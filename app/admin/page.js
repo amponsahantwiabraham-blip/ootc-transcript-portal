@@ -27,7 +27,7 @@ export default function AdminPage() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [deleting, setDeleting] = useState(false);
 
-  const ADMIN_SECRET = 'admin123';
+  const ADMIN_SECRET = 'GRANAHAMS0011';
 
   const classesList = [
     '1A1', '1A2', '1A3', '1A4', '1A5', '1A6', '1A7', '1A8', '1A9', '1A10', '1A11', '1A12',
