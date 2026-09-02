@@ -1,447 +1,653 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import Image from 'next/image';
+import { useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
-import { supabase } from '../../lib/supabaseClient';
+import QRCode from 'react-qr-code';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+);
+
+// --- GREEN & YELLOW BRAND CONFIGURATION ---
+const BRAND_LOGO_URL = '/logo.png'; 
+const BRAND_NAME = 'OOTC Transcript Portal';
+const BASE_VERIFY_URL = 'https://ootc-transcript-portal.vercel.app';
+
+// Theme styles
+const BRAND_BG = 'bg-emerald-700 hover:bg-emerald-800';
+const BRAND_TEXT = 'text-emerald-800';
+const BRAND_RING = 'focus:ring-yellow-400 focus:border-emerald-600';
+
+const generateSerialCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `TRN-${result}`;
+};
 
 export default function AdminPage() {
-  const [authenticated, setAuthenticated] = useState(false);
-  const [adminPasswordInput, setAdminPasswordInput] = useState('');
-  const [authError, setAuthError] = useState('');
-
+  const router = useRouter();
   const [students, setStudents] = useState([]);
-  const [uploadedPdfIds, setUploadedPdfIds] = useState(new Set());
-  const [selectedClass, setSelectedClass] = useState('');
-  const [pdfFilter, setPdfFilter] = useState('ALL'); // 'ALL', 'UPLOADED', 'NOT_UPLOADED'
-  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [uploadingId, setUploadingId] = useState(null);
+  const [uploadingPdfId, setUploadingPdfId] = useState(null);
+  const [activeTab, setActiveTab] = useState('single');
+  const [selectedStudentIds, setSelectedStudentIds] = useState([]);
 
-  // Single Add Form State
-  const [fullName, setFullName] = useState('');
-  const [singleClass, setSingleClass] = useState('');
-  const [adding, setAdding] = useState(false);
+  // Search & Filter States
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterClass, setFilterClass] = useState('ALL');
+  const [filterPdfStatus, setFilterPdfStatus] = useState('ALL');
 
-  // Selection & Batch Delete State
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [deleting, setDeleting] = useState(false);
-
-  const ADMIN_SECRET = 'GRANAHAMS0011';
-
-  const classesList = [
+  const classOptions = [
     '1A1', '1A2', '1A3', '1A4', '1A5', '1A6', '1A7', '1A8', '1A9', '1A10', '1A11', '1A12',
-    '1B1', '1B2', '1AG1', '1AG2', '1H1', '1H2', '1H3', '1H4', '1S1', '1S2', '1S3', '1S4',
-    '1V1', '1V2', '1V3', '1V4',
+    '1B1', '1B2', '1AG1', '1AG2', '1H1', '1H2', '1H3', '1H4', '1S1', '1S2', '1S3', '1S4', '1V1', '1V2', '1V3', '1V4',
     '2A1', '2A2', '2A3', '2A4', '2A5', '2A6', '2A7', '2A8', '2A9', '2A10', '2A11', '2A12',
-    '2B1', '2B2', '2AG1', '2AG2', '2H1', '2H2', '2H3', '2H4', '2S1', '2S2', '2S3', '2S4',
-    '2V1', '2V2', '2V3', '2V4',
+    '2B1', '2B2', '2AG1', '2AG2', '2H1', '2H2', '2H3', '2H4', '2S1', '2S2', '2S3', '2S4', '2V1', '2V2', '2V3', '2V4',
     '3A1', '3A2', '3A3', '3A4', '3A5', '3A6', '3A7', '3A8', '3A9', '3A10', '3A11', '3A12',
-    '3B1', '3B2', '3AG1', '3AG2', '3H1', '3H2', '3H3', '3H4', '3S1', '3S2', '3S3', '3S4',
-    '3V1', '3V2', '3V3', '3V4'
+    '3B1', '3B2', '3AG1', '3AG2', '3H1', '3H2', '3H3', '3H4', '3S1', '3S2', '3S3', '3S4', '3V1', '3V2', '3V3', '3V4'
   ];
 
-  const generateSerialCode = () => {
-    const randomNum = Math.floor(100000 + Math.random() * 900000);
-    return `OOTC-2026-${randomNum}`;
-  };
+  const [newStudent, setNewStudent] = useState({
+    full_name: '',
+    class: classOptions[0],
+    id_number: '',
+    student_id: '',
+  });
 
-  const handleAdminLogin = (e) => {
-    e.preventDefault();
-    if (adminPasswordInput === ADMIN_SECRET) {
-      setAuthenticated(true);
-      setAuthError('');
+  // CHECK AUTHENTICATION ON LOAD
+  useEffect(() => {
+    const isAuth = localStorage.getItem('ootc_admin_auth');
+    if (!isAuth) {
+      router.push('/admin/login');
     } else {
-      setAuthError('Incorrect Admin Password');
+      fetchStudents();
+      setNewStudent((prev) => ({ ...prev, student_id: generateSerialCode() }));
     }
-  };
+  }, [router]);
 
-  const checkUploadedPdfs = async (studentList) => {
-    const { data: files } = await supabase.storage.from('transcripts').list();
-    if (files) {
-      const fileSet = new Set(files.map(f => f.name.replace('.pdf', '')));
-      setUploadedPdfIds(fileSet);
-    }
+  const handleLogout = () => {
+    localStorage.removeItem('ootc_admin_auth');
+    router.push('/admin/login');
   };
 
   const fetchStudents = async () => {
-    setLoading(true);
-    let query = supabase.from('students').select('*').order('full_name', { ascending: true });
-    if (selectedClass) query = query.eq('class', selectedClass);
-
-    const { data } = await query;
-    const studentList = data || [];
-    setStudents(studentList);
-    setSelectedIds([]);
-    await checkUploadedPdfs(studentList);
-    setLoading(false);
+    const { data } = await supabase.from('students').select('*').order('created_at', { ascending: false });
+    if (data) setStudents(data);
   };
 
-  useEffect(() => {
-    if (authenticated) fetchStudents();
-  }, [authenticated, selectedClass]);
+  const filteredStudents = useMemo(() => {
+    return students.filter((st) => {
+      const matchesSearch =
+        st.full_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        st.id_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        st.student_id?.toLowerCase().includes(searchQuery.toLowerCase());
 
-  // Download Template
-  const handleDownloadTemplate = () => {
-    const sampleData = [
-      { full_name: 'Kofi Mensah', class: '1A1' },
-      { full_name: 'Ama Serwaa', class: '2H3' },
-      { full_name: 'Kwame Nkrumah', class: '3S1' }
-    ];
+      const matchesClass = filterClass === 'ALL' || st.class === filterClass;
 
-    const worksheet = XLSX.utils.json_to_sheet(sampleData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Students_Template');
-    XLSX.writeFile(workbook, 'OOTC_Student_Import_Template.xlsx');
-  };
+      const matchesPdf =
+        filterPdfStatus === 'ALL' ||
+        (filterPdfStatus === 'UPLOADED' && !!st.transcript_url) ||
+        (filterPdfStatus === 'PENDING' && !st.transcript_url);
 
-  // Add Single Student
-  const handleAddSingleStudent = async (e) => {
+      return matchesSearch && matchesClass && matchesPdf;
+    });
+  }, [students, searchQuery, filterClass, filterPdfStatus]);
+
+  const printableStudents = useMemo(() => {
+    if (selectedStudentIds.length > 0) {
+      return students.filter((st) => selectedStudentIds.includes(st.id));
+    }
+    return filteredStudents;
+  }, [students, selectedStudentIds, filteredStudents]);
+
+  const handleAddStudent = async (e) => {
     e.preventDefault();
-    if (!fullName || !singleClass) return;
-    setAdding(true);
+    if (!newStudent.full_name || !newStudent.class || !newStudent.id_number || !newStudent.student_id) {
+      return alert('All fields are required.');
+    }
 
-    const serialCode = generateSerialCode();
-
-    const { error } = await supabase.from('students').insert([
-      { full_name: fullName, class: singleClass, student_id: serialCode }
-    ]);
+    setLoading(true);
+    const { error } = await supabase.from('students').insert([newStudent]);
+    setLoading(false);
 
     if (error) {
-      alert('Failed to add student: ' + error.message);
+      alert('Error adding student: ' + error.message);
     } else {
-      alert(`Student added! Serial Code: ${serialCode}`);
-      setFullName('');
-      setSingleClass('');
+      alert('Student added successfully!');
+      setNewStudent({
+        full_name: '',
+        class: classOptions[0],
+        id_number: '',
+        student_id: generateSerialCode(),
+      });
       fetchStudents();
     }
-    setAdding(false);
   };
 
-  // Upload Excel Batch
+  const handleDownloadExcelTemplate = () => {
+    const templateData = [
+      { 'Full Name': 'Kwame Mensah', 'Class': '1A1', 'Student ID': 'STU-1001', 'Serial Code': 'TRN-8A3K9P' },
+      { 'Full Name': 'Ama Serwaa', 'Class': '1A2', 'Student ID': 'STU-1002', 'Serial Code': 'TRN-4M9P2Q' }
+    ];
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Students');
+    XLSX.writeFile(workbook, 'Student_Upload_Template.xlsx');
+  };
+
   const handleExcelUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    setLoading(true);
     const reader = new FileReader();
     reader.onload = async (evt) => {
-      const bstr = evt.target.result;
-      const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      try {
+        const bstr = evt.target.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsName = wb.SheetNames[0];
+        const ws = wb.Sheets[wsName];
+        const data = XLSX.utils.sheet_to_json(ws);
 
-      if (data.length === 0) {
-        alert('The uploaded Excel file is empty.');
-        return;
-      }
+        const rows = data.map((row) => ({
+          full_name: row['Full Name'],
+          class: row['Class'],
+          id_number: row['Student ID'],
+          student_id: row['Serial Code'] || generateSerialCode(),
+        }));
 
-      const formattedRecords = data.map((row) => ({
-        full_name: row.full_name || row['Full Name'] || row['Name'],
-        class: row.class || row['Class'],
-        student_id: generateSerialCode(),
-      })).filter((item) => item.full_name && item.class);
+        const { error } = await supabase.from('students').insert(rows);
+        setLoading(false);
 
-      if (formattedRecords.length === 0) {
-        alert('Invalid Excel format. Ensure headers are "full_name" and "class".');
-        return;
-      }
-
-      const { error } = await supabase.from('students').insert(formattedRecords);
-
-      if (error) {
-        alert('Failed to import Excel data: ' + error.message);
-      } else {
-        alert(`Successfully imported ${formattedRecords.length} students with Serial Codes!`);
-        fetchStudents();
+        if (error) {
+          alert('Bulk upload failed: ' + error.message);
+        } else {
+          alert(`Successfully imported ${rows.length} students!`);
+          e.target.value = '';
+          fetchStudents();
+        }
+      } catch (err) {
+        setLoading(false);
+        alert('Error parsing Excel file.');
       }
     };
     reader.readAsBinaryString(file);
-    e.target.value = null;
   };
 
-  // Upload PDF
-  const handleFileUpload = async (e, serialCode) => {
+  const handlePdfUpload = async (studentId, e) => {
     const file = e.target.files[0];
-    if (!file || file.type !== 'application/pdf') {
-      alert('Please select a valid PDF file.');
-      return;
+    if (!file) return;
+
+    if (file.type !== 'application/pdf') {
+      return alert('Please select a valid PDF file.');
     }
 
-    setUploadingId(serialCode);
+    setUploadingPdfId(studentId);
+    const fileExt = file.name.split('.').pop();
+    const filePath = `transcripts/${studentId}_${Date.now()}.${fileExt}`;
 
-    try {
-      const { error } = await supabase.storage
-        .from('transcripts')
-        .upload(`${serialCode}.pdf`, file, { cacheControl: '3600', upsert: true });
+    const { error: uploadError } = await supabase.storage
+      .from('transcripts')
+      .upload(filePath, file, { upsert: true });
 
-      if (error) throw error;
-      alert(`Transcript PDF uploaded for Serial Code: ${serialCode}`);
+    if (uploadError) {
+      setUploadingPdfId(null);
+      return alert('Failed to upload transcript: ' + uploadError.message);
+    }
+
+    const { data: urlData } = supabase.storage.from('transcripts').getPublicUrl(filePath);
+
+    const { error: updateError } = await supabase
+      .from('students')
+      .update({ transcript_url: urlData.publicUrl })
+      .eq('id', studentId);
+
+    setUploadingPdfId(null);
+
+    if (updateError) {
+      alert('Failed to link PDF: ' + updateError.message);
+    } else {
+      alert('Transcript uploaded successfully!');
       fetchStudents();
-    } catch (err) {
-      alert('Upload failed: ' + err.message);
-    } finally {
-      setUploadingId(null);
     }
   };
 
-  // Delete Single Student
-  const handleDeleteSingle = async (id, serialCode, name) => {
+  const handleDeleteSingle = async (id, name) => {
     if (!confirm(`Are you sure you want to delete ${name}?`)) return;
 
-    await supabase.storage.from('transcripts').remove([`${serialCode}.pdf`]);
-    await supabase.from('students').delete().eq('id', id);
-
-    alert('Student deleted successfully.');
-    fetchStudents();
+    const { error } = await supabase.from('students').delete().eq('id', id);
+    if (error) {
+      alert('Delete failed: ' + error.message);
+    } else {
+      setSelectedStudentIds((prev) => prev.filter((item) => item !== id));
+      fetchStudents();
+    }
   };
 
-  // Batch Delete
-  const handleBatchDelete = async () => {
-    if (selectedIds.length === 0) return;
-    if (!confirm(`Delete ${selectedIds.length} selected student(s)?`)) return;
-
-    setDeleting(true);
-    const selectedStudents = students.filter((st) => selectedIds.includes(st.id));
-    const filePaths = selectedStudents.map((st) => `${st.student_id}.pdf`);
-
-    await supabase.storage.from('transcripts').remove(filePaths);
-    await supabase.from('students').delete().in('id', selectedIds);
-
-    alert('Selected students deleted successfully.');
-    fetchStudents();
-    setDeleting(false);
+  const handleSelectAll = (e) => {
+    if (e.target.checked) {
+      setSelectedStudentIds(filteredStudents.map((st) => st.id));
+    } else {
+      setSelectedStudentIds([]);
+    }
   };
 
-  // Filtering Logic (Search + Class + PDF Status)
-  const filteredStudents = students.filter((st) => {
-    const q = searchQuery.toLowerCase().trim();
-    const nameMatch = st.full_name ? st.full_name.toLowerCase().includes(q) : false;
-    const codeMatch = st.student_id ? st.student_id.toLowerCase().includes(q) : false;
-    const matchesSearch = nameMatch || codeMatch;
-
-    const hasPdf = uploadedPdfIds.has(st.student_id);
-    let matchesPdfFilter = true;
-    if (pdfFilter === 'UPLOADED') matchesPdfFilter = hasPdf;
-    if (pdfFilter === 'NOT_UPLOADED') matchesPdfFilter = !hasPdf;
-
-    return matchesSearch && matchesPdfFilter;
-  });
-
-  if (!authenticated) {
-    return (
-      <div className="min-h-screen bg-gray-100 flex flex-col justify-center items-center p-4">
-        <div className="max-w-md w-full bg-white rounded-lg shadow-md border-t-4 border-green-800 p-8">
-          <div className="flex flex-col items-center mb-6">
-            <Image src="/logo.png" alt="Logo" width={70} height={70} className="object-contain mb-2" />
-            <h1 className="text-xl font-bold text-green-900 uppercase">Admin Access</h1>
-          </div>
-
-          {authError && <div className="mb-4 p-2 bg-red-100 text-red-700 rounded text-xs text-center">{authError}</div>}
-
-          <form onSubmit={handleAdminLogin} className="space-y-4">
-            <input
-              type="password"
-              required
-              value={adminPasswordInput}
-              onChange={(e) => setAdminPasswordInput(e.target.value)}
-              placeholder="Enter Admin Password"
-              className="w-full px-3 py-2 border rounded text-sm focus:outline-none focus:border-green-800"
-            />
-            <button type="submit" className="w-full bg-green-800 text-yellow-400 font-bold py-2 rounded text-sm">
-              Access Admin Panel
-            </button>
-          </form>
-        </div>
-      </div>
+  const handleSelectStudent = (id) => {
+    setSelectedStudentIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
-  }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedStudentIds.length === 0) return;
+    if (!confirm(`Delete ${selectedStudentIds.length} student(s)?`)) return;
+
+    const { error } = await supabase.from('students').delete().in('id', selectedStudentIds);
+    if (error) {
+      alert('Bulk delete failed: ' + error.message);
+    } else {
+      alert('Selected students deleted!');
+      setSelectedStudentIds([]);
+      fetchStudents();
+    }
+  };
+
+  const handleTriggerPrint = () => {
+    window.print();
+  };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-6">
-      <div className="max-w-7xl mx-auto bg-white rounded-lg shadow-md p-6 border-t-4 border-green-800 space-y-6">
-        
-        {/* Header */}
-        <div className="flex flex-col md:flex-row items-center justify-between border-b pb-4">
-          <div className="flex items-center space-x-3">
-            <Image src="/logo.png" alt="Logo" width={50} height={50} className="object-contain" />
-            <h1 className="text-xl font-bold text-green-900 uppercase">Admin Student Management</h1>
+    <>
+      {/* ----------------- ADMIN DASHBOARD (HIDDEN WHEN PRINTING) ----------------- */}
+      <div className="print:hidden min-h-screen bg-amber-50/30 p-6 max-w-6xl mx-auto space-y-8">
+        {/* BRAND HEADER & LOGO */}
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-emerald-200 pb-4 gap-4">
+          <div className="flex items-center gap-3">
+            <img src={BRAND_LOGO_URL} alt="Brand Logo" className="h-10 w-auto object-contain" />
+            <h1 className="text-2xl font-bold text-emerald-950">{BRAND_NAME}</h1>
           </div>
-          <button onClick={() => setAuthenticated(false)} className="text-xs text-red-600 font-bold hover:underline mt-2 md:mt-0">
-            Lock Panel
-          </button>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveTab('single')}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                activeTab === 'single' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+              }`}
+            >
+              Add Single Student
+            </button>
+            <button
+              onClick={() => setActiveTab('bulk')}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                activeTab === 'bulk' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+              }`}
+            >
+              Bulk Excel Upload
+            </button>
+            <button
+              onClick={handleLogout}
+              className="bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 px-3 py-2 rounded-lg font-medium text-sm transition"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
-        {/* Add Student Controls */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-gray-50 p-4 rounded-md border">
-          
-          {/* Manual Add Form */}
-          <form onSubmit={handleAddSingleStudent} className="space-y-3">
-            <h2 className="text-xs font-bold text-green-900 uppercase">1. Add Single Student</h2>
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                placeholder="Full Name"
-                required
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                className="w-1/2 px-3 py-1.5 border rounded text-xs focus:outline-none focus:border-green-800"
-              />
-              <select
-                required
-                value={singleClass}
-                onChange={(e) => setSingleClass(e.target.value)}
-                className="w-1/2 px-3 py-1.5 border rounded text-xs bg-white focus:outline-none focus:border-green-800"
-              >
-                <option value="">Select Class</option>
-                {classesList.map((cls) => <option key={cls} value={cls}>{cls}</option>)}
-              </select>
-            </div>
-            <button type="submit" disabled={adding} className="bg-green-800 text-yellow-400 text-xs font-bold py-2 px-4 rounded shadow">
-              {adding ? 'Generating Serial Code...' : 'Add Student (Auto Serial Code)'}
-            </button>
-          </form>
+        {activeTab === 'single' && (
+          <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
+            <h2 className="text-xl font-bold text-emerald-900">Add New Student</h2>
+            <form onSubmit={handleAddStudent} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Full Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Kwame Mensah"
+                  value={newStudent.full_name}
+                  onChange={(e) => setNewStudent({ ...newStudent, full_name: e.target.value })}
+                  className={`w-full border p-2.5 rounded-lg text-sm text-slate-800 focus:outline-none focus:ring-2 ${BRAND_RING}`}
+                />
+              </div>
 
-          {/* Excel Import */}
-          <div className="space-y-3 border-t md:border-t-0 md:border-l md:pl-6 pt-4 md:pt-0">
-            <h2 className="text-xs font-bold text-green-900 uppercase">2. Bulk Import via Excel</h2>
-            
-            <div className="flex flex-wrap gap-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Select Class</label>
+                <select
+                  value={newStudent.class}
+                  onChange={(e) => setNewStudent({ ...newStudent, class: e.target.value })}
+                  className={`w-full border p-2.5 rounded-lg text-sm text-slate-800 focus:outline-none focus:ring-2 ${BRAND_RING} bg-white`}
+                >
+                  {classOptions.map((cls) => (
+                    <option key={cls} value={cls}>
+                      {cls}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Student ID Number</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. STU-1005"
+                  value={newStudent.id_number}
+                  onChange={(e) => setNewStudent({ ...newStudent, id_number: e.target.value })}
+                  className={`w-full border p-2.5 rounded-lg text-sm text-slate-800 focus:outline-none focus:ring-2 ${BRAND_RING}`}
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-xs font-medium text-slate-600">
+                    Serial Code <span className="text-emerald-700 font-normal">(Auto-generated)</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setNewStudent({ ...newStudent, student_id: generateSerialCode() })}
+                    className="text-xs font-bold text-emerald-700 hover:underline"
+                  >
+                    Regenerate
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={newStudent.student_id}
+                  onChange={(e) => setNewStudent({ ...newStudent, student_id: e.target.value })}
+                  className={`w-full border p-2.5 rounded-lg text-sm font-mono font-bold text-emerald-900 bg-yellow-50/60 focus:outline-none focus:ring-2 ${BRAND_RING}`}
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className={`${BRAND_BG} text-yellow-300 font-bold px-6 py-2.5 rounded-lg text-sm transition shadow-sm`}
+                >
+                  {loading ? 'Saving...' : 'Save Student'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {activeTab === 'bulk' && (
+          <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-6">
+            <h2 className="text-xl font-bold text-emerald-900">Bulk Upload Students via Excel</h2>
+
+            <div className="p-4 bg-yellow-50/80 border border-yellow-300 rounded-lg space-y-2">
+              <h3 className="font-semibold text-amber-900 text-sm">Step 1: Download Format</h3>
+              <p className="text-xs text-amber-800">Get the formatted Excel sheet pre-configured with column headers.</p>
               <button
-                type="button"
-                onClick={handleDownloadTemplate}
-                className="bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-bold py-2 px-3 rounded border border-gray-400 shadow transition"
+                onClick={handleDownloadExcelTemplate}
+                className="bg-emerald-700 text-yellow-300 px-4 py-2 rounded-lg text-xs font-semibold hover:bg-emerald-800 transition"
               >
-                📥 Download Excel Template
+                Download Excel Template (.xlsx)
               </button>
+            </div>
 
-              <label className="bg-yellow-500 hover:bg-yellow-600 text-green-950 text-xs font-bold py-2 px-4 rounded cursor-pointer shadow transition inline-block">
-                📤 Upload Filled Excel
-                <input type="file" accept=".xlsx, .xls, .csv" onChange={handleExcelUpload} className="hidden" />
+            <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg space-y-2">
+              <h3 className="font-semibold text-emerald-900 text-sm">Step 2: Upload Filled File</h3>
+              <p className="text-xs text-emerald-800">Select your completed Excel file to import all students at once.</p>
+              <label className="inline-block bg-yellow-400 text-emerald-950 font-bold px-5 py-2.5 rounded-lg text-xs cursor-pointer hover:bg-yellow-500 transition shadow-sm">
+                {loading ? 'Uploading...' : 'Select & Upload Excel File'}
+                <input type="file" accept=".xlsx, .xls" onChange={handleExcelUpload} disabled={loading} className="hidden" />
               </label>
             </div>
           </div>
+        )}
 
-        </div>
+        {/* STUDENT ROSTER LIST & FILTERS */}
+        <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b pb-4">
+            <div>
+              <h2 className="text-xl font-bold text-emerald-900">
+                Existing Students ({filteredStudents.length} / {students.length})
+              </h2>
+              <p className="text-xs text-slate-500">Filter, search, and print student verification slips</p>
+            </div>
 
-        {/* Toolbar & Filters */}
-        <div className="flex flex-col md:flex-row items-center justify-between bg-gray-50 p-3 rounded border text-xs gap-3">
-          <div className="font-semibold text-gray-700">
-            Records Shown: <span className="bg-green-800 text-yellow-400 px-2 py-0.5 rounded-full font-bold ml-1">{filteredStudents.length}</span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-            {/* Search Input */}
-            <input
-              type="text"
-              placeholder="🔍 Search Name or Serial Code..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="px-3 py-1.5 border rounded bg-white text-xs focus:outline-none focus:border-green-800"
-            />
-
-            {/* Class Filter */}
-            <select
-              value={selectedClass}
-              onChange={(e) => setSelectedClass(e.target.value)}
-              className="px-2 py-1.5 border rounded bg-white text-xs focus:outline-none focus:border-green-800"
-            >
-              <option value="">All Classes</option>
-              {classesList.map((cls) => <option key={cls} value={cls}>{cls}</option>)}
-            </select>
-
-            {/* PDF Status Filter */}
-            <select
-              value={pdfFilter}
-              onChange={(e) => setPdfFilter(e.target.value)}
-              className="px-2 py-1.5 border rounded bg-white text-xs font-semibold focus:outline-none focus:border-green-800"
-            >
-              <option value="ALL">📄 All PDF Statuses</option>
-              <option value="UPLOADED">✅ PDF Uploaded</option>
-              <option value="NOT_UPLOADED">❌ PDF Not Uploaded</option>
-            </select>
-
-            {/* Batch Delete */}
-            {selectedIds.length > 0 && (
-              <button onClick={handleBatchDelete} disabled={deleting} className="bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-3 rounded whitespace-nowrap">
-                Delete Selected ({selectedIds.length})
+            <div className="flex items-center gap-2">
+              {/* PRINT SLIPS BUTTON */}
+              <button
+                onClick={handleTriggerPrint}
+                className="bg-emerald-800 text-yellow-300 border border-yellow-400/30 px-4 py-2 rounded-lg text-xs font-bold hover:bg-emerald-900 transition flex items-center gap-1.5 shadow-sm"
+              >
+                🖨️ Print Slips ({printableStudents.length})
               </button>
-            )}
+
+              {selectedStudentIds.length > 0 && (
+                <button
+                  onClick={handleDeleteSelected}
+                  className="bg-rose-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-rose-700 transition flex items-center gap-1"
+                >
+                  Delete ({selectedStudentIds.length})
+                </button>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="bg-green-800 text-white uppercase">
-                <th className="p-2 text-center w-8">
-                  <input
-                    type="checkbox"
-                    onChange={(e) => setSelectedIds(e.target.checked ? filteredStudents.map((s) => s.id) : [])}
-                    checked={selectedIds.length === filteredStudents.length && filteredStudents.length > 0}
-                  />
-                </th>
-                <th className="p-2 text-center w-8">S/N</th>
-                <th className="p-2">Full Name</th>
-                <th className="p-2">Class</th>
-                <th className="p-2">Serial Code</th>
-                <th className="p-2 text-center">PDF Status</th>
-                <th className="p-2 text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredStudents.map((st, idx) => {
-                const isPdfUploaded = uploadedPdfIds.has(st.student_id);
+          {/* SEARCH & FILTERS BAR */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-emerald-50/50 p-3 rounded-lg border border-emerald-100">
+            <div>
+              <label className="block text-xs font-medium text-emerald-950 mb-1">Search Name or ID</label>
+              <input
+                type="text"
+                placeholder="Search by name, student ID..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className={`w-full border p-2 rounded-md text-xs text-slate-800 bg-white focus:outline-none focus:ring-2 ${BRAND_RING}`}
+              />
+            </div>
 
-                return (
-                  <tr key={st.id} className={idx % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
-                    <td className="p-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(st.id)}
-                        onChange={() => setSelectedIds(selectedIds.includes(st.id) ? selectedIds.filter((i) => i !== st.id) : [...selectedIds, st.id])}
-                      />
-                    </td>
-                    <td className="p-2 text-center font-bold text-gray-500">{idx + 1}</td>
-                    <td className="p-2 font-semibold text-gray-800">{st.full_name}</td>
-                    <td className="p-2 text-gray-600">{st.class}</td>
-                    <td className="p-2 font-mono font-bold text-green-900">{st.student_id}</td>
-                    <td className="p-2 text-center">
-                      {isPdfUploaded ? (
-                        <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded font-bold text-[10px]">✅ Uploaded</span>
-                      ) : (
-                        <span className="bg-red-100 text-red-800 px-2 py-0.5 rounded font-bold text-[10px]">❌ Pending</span>
-                      )}
-                    </td>
-                    <td className="p-2 text-center space-x-2">
-                      <label className="bg-green-800 hover:bg-green-900 text-yellow-400 font-bold py-1 px-2.5 rounded cursor-pointer shadow inline-block">
-                        {uploadingId === st.student_id ? 'Uploading...' : 'Upload PDF'}
-                        <input type="file" accept="application/pdf" className="hidden" onChange={(e) => handleFileUpload(e, st.student_id)} />
-                      </label>
+            <div>
+              <label className="block text-xs font-medium text-emerald-950 mb-1">Filter by Class</label>
+              <select
+                value={filterClass}
+                onChange={(e) => setFilterClass(e.target.value)}
+                className={`w-full border p-2 rounded-md text-xs text-slate-800 bg-white focus:outline-none focus:ring-2 ${BRAND_RING}`}
+              >
+                <option value="ALL">All Classes</option>
+                {classOptions.map((cls) => (
+                  <option key={cls} value={cls}>
+                    {cls}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-                      <button
-                        onClick={() => handleDeleteSingle(st.id, st.student_id, st.full_name)}
-                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-2 rounded shadow text-[10px]"
-                      >
-                        Delete
-                      </button>
+            <div>
+              <label className="block text-xs font-medium text-emerald-950 mb-1">Filter by PDF Status</label>
+              <select
+                value={filterPdfStatus}
+                onChange={(e) => setFilterPdfStatus(e.target.value)}
+                className={`w-full border p-2 rounded-md text-xs text-slate-800 bg-white focus:outline-none focus:ring-2 ${BRAND_RING}`}
+              >
+                <option value="ALL">All PDF Statuses</option>
+                <option value="UPLOADED">Uploaded Only</option>
+                <option value="PENDING">Pending Only</option>
+              </select>
+            </div>
+          </div>
+
+          {/* ROSTER TABLE */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm border-collapse">
+              <thead>
+                <tr className="border-b bg-emerald-50/60 text-emerald-950 font-semibold">
+                  <th className="p-3 w-10">
+                    <input
+                      type="checkbox"
+                      onChange={handleSelectAll}
+                      checked={
+                        filteredStudents.length > 0 &&
+                        selectedStudentIds.length === filteredStudents.length
+                      }
+                      className="rounded border-emerald-300 text-emerald-600 focus:ring-yellow-400"
+                    />
+                  </th>
+                  <th className="p-3">Full Name</th>
+                  <th className="p-3">Class</th>
+                  <th className="p-3">Student ID</th>
+                  <th className="p-3">Serial Code</th>
+                  <th className="p-3">PDF Status</th>
+                  <th className="p-3">Upload Transcript</th>
+                  <th className="p-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredStudents.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="p-6 text-center text-slate-500">
+                      No matching students found.
                     </td>
                   </tr>
-                );
-              })}
-              {filteredStudents.length === 0 && (
-                <tr>
-                  <td colSpan="7" className="text-center p-4 text-gray-500">
-                    No students found.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                ) : (
+                  filteredStudents.map((st) => {
+                    const isSelected = selectedStudentIds.includes(st.id);
+                    const isUploaded = !!st.transcript_url;
 
+                    return (
+                      <tr key={st.id} className={`border-b hover:bg-yellow-50/30 ${isSelected ? 'bg-yellow-50' : ''}`}>
+                        <td className="p-3">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleSelectStudent(st.id)}
+                            className="rounded border-emerald-300 text-emerald-600 focus:ring-yellow-400"
+                          />
+                        </td>
+                        <td className="p-3 font-medium text-slate-800">{st.full_name}</td>
+                        <td className="p-3 text-emerald-900 font-semibold">{st.class}</td>
+                        <td className={`p-3 font-mono font-bold ${BRAND_TEXT}`}>{st.id_number || 'N/A'}</td>
+                        <td className="p-3 font-mono text-amber-700 font-semibold">{st.student_id}</td>
+
+                        <td className="p-3">
+                          {isUploaded ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                              Uploaded
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                              Pending
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="p-3">
+                          <div className="flex items-center gap-2">
+                            <label className="cursor-pointer bg-emerald-50 border border-emerald-200 text-emerald-900 hover:bg-emerald-100 px-3 py-1.5 rounded-md text-xs font-medium transition">
+                              {uploadingPdfId === st.id ? 'Uploading...' : isUploaded ? 'Replace PDF' : 'Upload PDF'}
+                              <input
+                                type="file"
+                                accept="application/pdf"
+                                onChange={(e) => handlePdfUpload(st.id, e)}
+                                disabled={uploadingPdfId === st.id}
+                                className="hidden"
+                              />
+                            </label>
+
+                            {isUploaded && (
+                              <a
+                                href={st.transcript_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`text-xs underline font-bold ${BRAND_TEXT}`}
+                              >
+                                View
+                              </a>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => handleDeleteSingle(st.id, st.full_name)}
+                            className="text-xs text-rose-600 hover:text-rose-800 font-semibold hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
-    </div>
+
+      {/* ----------------- PRINTABLE STUDENT SLIPS (VISIBLE ONLY WHEN PRINTING) ----------------- */}
+      <div className="hidden print:grid print:grid-cols-2 print:gap-4 print:p-2 bg-white text-black font-sans">
+        {printableStudents.map((st) => {
+          const verifyUrl = `${BASE_VERIFY_URL}/verify?code=${st.student_id}&id=${st.id_number}`;
+
+          return (
+            <div
+              key={st.id}
+              className="border-2 border-emerald-800 rounded-lg p-4 flex flex-col justify-between space-y-3 bg-white page-break-inside-avoid"
+            >
+              {/* SLIP HEADER */}
+              <div className="flex items-center justify-between border-b border-emerald-800/30 pb-2">
+                <div className="flex items-center gap-2">
+                  <img src={BRAND_LOGO_URL} alt="Logo" className="h-7 w-auto object-contain" />
+                  <span className="font-bold text-xs text-emerald-950 uppercase tracking-wide">
+                    {BRAND_NAME}
+                  </span>
+                </div>
+                <span className="text-[10px] font-bold text-emerald-800 bg-yellow-100 px-2 py-0.5 rounded border border-yellow-300">
+                  OFFICIAL ACCESS CARD
+                </span>
+              </div>
+
+              {/* SLIP BODY */}
+              <div className="flex justify-between items-center gap-2">
+                <div className="space-y-1.5 text-xs">
+                  <div>
+                    <span className="text-[10px] uppercase text-gray-500 block font-semibold">Student Name</span>
+                    <span className="font-bold text-sm text-gray-900">{st.full_name}</span>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <div>
+                      <span className="text-[10px] uppercase text-gray-500 block font-semibold">Class</span>
+                      <span className="font-bold text-emerald-900">{st.class}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] uppercase text-gray-500 block font-semibold">Student ID</span>
+                      <span className="font-mono font-bold text-gray-800">{st.id_number || 'N/A'}</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] uppercase text-gray-500 block font-semibold">Verification Serial Code</span>
+                    <span className="font-mono font-black text-amber-800 text-sm">{st.student_id}</span>
+                  </div>
+                </div>
+
+                {/* QR CODE GENERATOR */}
+                <div className="flex flex-col items-center justify-center p-1.5 bg-gray-50 border rounded-md">
+                  <QRCode value={verifyUrl} size={82} />
+                  <span className="text-[8px] font-semibold text-gray-500 mt-1">SCAN TO ACCESS</span>
+                </div>
+              </div>
+
+              {/* SLIP FOOTER */}
+              <div className="border-t border-dashed border-gray-300 pt-1.5 text-[9px] text-gray-500 text-center">
+                Scan QR Code or visit <span className="font-bold text-emerald-900">{BASE_VERIFY_URL}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
