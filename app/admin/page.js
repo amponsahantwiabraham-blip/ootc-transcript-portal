@@ -4,19 +4,19 @@ import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
-import QRCode from 'react-qr-code';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith('http')
+  ? process.env.NEXT_PUBLIC_SUPABASE_URL
+  : 'https://placeholder.supabase.co';
 
-// --- GREEN & YELLOW BRAND CONFIGURATION ---
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
 const BRAND_LOGO_URL = '/logo.png'; 
 const BRAND_NAME = 'OOTC Transcript Portal';
 const BASE_VERIFY_URL = 'https://ootc-transcript-portal.vercel.app';
 
-// Theme styles
 const BRAND_BG = 'bg-emerald-700 hover:bg-emerald-800';
 const BRAND_TEXT = 'text-emerald-800';
 const BRAND_RING = 'focus:ring-yellow-400 focus:border-emerald-600';
@@ -33,12 +33,13 @@ const generateSerialCode = () => {
 export default function AdminPage() {
   const router = useRouter();
   const [students, setStudents] = useState([]);
+  const [downloadLogs, setDownloadLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploadingPdfId, setUploadingPdfId] = useState(null);
+  const [clearingLogs, setClearingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState('single');
   const [selectedStudentIds, setSelectedStudentIds] = useState([]);
 
-  // Search & Filter States
   const [searchQuery, setSearchQuery] = useState('');
   const [filterClass, setFilterClass] = useState('ALL');
   const [filterPdfStatus, setFilterPdfStatus] = useState('ALL');
@@ -59,13 +60,13 @@ export default function AdminPage() {
     student_id: '',
   });
 
-  // CHECK AUTHENTICATION ON LOAD
   useEffect(() => {
     const isAuth = localStorage.getItem('ootc_admin_auth');
     if (!isAuth) {
       router.push('/admin/login');
     } else {
       fetchStudents();
+      fetchDownloadLogs();
       setNewStudent((prev) => ({ ...prev, student_id: generateSerialCode() }));
     }
   }, [router]);
@@ -80,6 +81,68 @@ export default function AdminPage() {
     if (data) setStudents(data);
   };
 
+  const fetchDownloadLogs = async () => {
+    const { data, error } = await supabase
+      .from('transcript_downloads')
+      .select('*')
+      .order('downloaded_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching logs:', error);
+      return;
+    }
+
+    if (data) setDownloadLogs(data);
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const res = await fetch('/api/admin/export-audit');
+      if (!res.ok) throw new Error('Failed to generate export file.');
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Transcript_Audit_Report_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('Export Error: ' + err.message);
+    }
+  };
+
+  const handleClearAllLogs = async () => {
+    const confirmed = window.confirm(
+      '⚠️ Are you sure you want to delete ALL download logs? This will wipe the transcript download audit history clean.'
+    );
+
+    if (!confirmed) return;
+
+    setClearingLogs(true);
+
+    try {
+      const res = await fetch('/api/admin/clear-all-logs', {
+        method: 'DELETE',
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to clear logs.');
+      }
+
+      alert('All download logs have been cleared successfully.');
+      fetchDownloadLogs();
+    } catch (err) {
+      alert('Error clearing logs: ' + err.message);
+    } finally {
+      setClearingLogs(false);
+    }
+  };
+
   const filteredStudents = useMemo(() => {
     return students.filter((st) => {
       const matchesSearch =
@@ -89,10 +152,11 @@ export default function AdminPage() {
 
       const matchesClass = filterClass === 'ALL' || st.class === filterClass;
 
+      const hasPdf = !!(st.transcript_url || st.transcript_pdf_url);
       const matchesPdf =
         filterPdfStatus === 'ALL' ||
-        (filterPdfStatus === 'UPLOADED' && !!st.transcript_url) ||
-        (filterPdfStatus === 'PENDING' && !st.transcript_url);
+        (filterPdfStatus === 'UPLOADED' && hasPdf) ||
+        (filterPdfStatus === 'PENDING' && !hasPdf);
 
       return matchesSearch && matchesClass && matchesPdf;
     });
@@ -131,7 +195,7 @@ export default function AdminPage() {
 
   const handleDownloadExcelTemplate = () => {
     const templateData = [
-      { 'Full Name': 'Kwame Mensah', 'Class': '1A1', 'Student ID': 'STU-1001', 'Serial Code': 'TRN-8A3K9P' },
+      { 'Full Name': 'Kwame Mensah', 'Class': '1A1', 'Student ID': '250000000000', 'Serial Code': 'TRN-8A3K9P' },
       { 'Full Name': 'Ama Serwaa', 'Class': '1A2', 'Student ID': 'STU-1002', 'Serial Code': 'TRN-4M9P2Q' }
     ];
     const worksheet = XLSX.utils.json_to_sheet(templateData);
@@ -187,24 +251,39 @@ export default function AdminPage() {
       return alert('Please select a valid PDF file.');
     }
 
+    const targetStudent = students.find((s) => s.id === studentId);
+    const studentIdentifier = targetStudent?.id_number || studentId;
+
     setUploadingPdfId(studentId);
     const fileExt = file.name.split('.').pop();
-    const filePath = `transcripts/${studentId}_${Date.now()}.${fileExt}`;
+    const filePath = `${studentIdentifier}_${Date.now()}.${fileExt}`;
 
     const { error: uploadError } = await supabase.storage
       .from('transcripts')
-      .upload(filePath, file, { upsert: true });
+      .upload(filePath, file, { upsert: true, contentType: 'application/pdf' });
 
     if (uploadError) {
       setUploadingPdfId(null);
       return alert('Failed to upload transcript: ' + uploadError.message);
     }
 
-    const { data: urlData } = supabase.storage.from('transcripts').getPublicUrl(filePath);
+    const { data: signedData, error: signedError } = await supabase.storage
+      .from('transcripts')
+      .createSignedUrl(filePath, 3600);
+
+    if (signedError || !signedData?.signedUrl) {
+      setUploadingPdfId(null);
+      return alert('Failed to generate secure access URL for file.');
+    }
+
+    const secureUrl = signedData.signedUrl;
 
     const { error: updateError } = await supabase
       .from('students')
-      .update({ transcript_url: urlData.publicUrl })
+      .update({ 
+        transcript_url: secureUrl,
+        transcript_pdf_url: secureUrl 
+      })
       .eq('id', studentId);
 
     setUploadingPdfId(null);
@@ -212,7 +291,7 @@ export default function AdminPage() {
     if (updateError) {
       alert('Failed to link PDF: ' + updateError.message);
     } else {
-      alert('Transcript uploaded successfully!');
+      alert('Transcript uploaded and saved successfully!');
       fetchStudents();
     }
   };
@@ -220,10 +299,16 @@ export default function AdminPage() {
   const handleDeleteSingle = async (id, name) => {
     if (!confirm(`Are you sure you want to delete ${name}?`)) return;
 
-    const { error } = await supabase.from('students').delete().eq('id', id);
+    const { error } = await supabase
+      .from('students')
+      .delete()
+      .or(`id.eq.${id},id_number.eq.${id}`);
+
     if (error) {
-      alert('Delete failed: ' + error.message);
+      console.error('SUPABASE DELETE ERROR:', error);
+      alert(`Delete failed: ${error.message} (Code: ${error.code})`);
     } else {
+      alert(`${name} deleted successfully.`);
       setSelectedStudentIds((prev) => prev.filter((item) => item !== id));
       fetchStudents();
     }
@@ -247,9 +332,14 @@ export default function AdminPage() {
     if (selectedStudentIds.length === 0) return;
     if (!confirm(`Delete ${selectedStudentIds.length} student(s)?`)) return;
 
-    const { error } = await supabase.from('students').delete().in('id', selectedStudentIds);
+    const { error } = await supabase
+      .from('students')
+      .delete()
+      .in('id', selectedStudentIds);
+
     if (error) {
-      alert('Bulk delete failed: ' + error.message);
+      console.error('SUPABASE BULK DELETE ERROR:', error);
+      alert(`Bulk delete failed: ${error.message} (Code: ${error.code})`);
     } else {
       alert('Selected students deleted!');
       setSelectedStudentIds([]);
@@ -263,9 +353,7 @@ export default function AdminPage() {
 
   return (
     <>
-      {/* ----------------- ADMIN DASHBOARD (HIDDEN WHEN PRINTING) ----------------- */}
       <div className="print:hidden min-h-screen bg-amber-50/30 p-6 max-w-6xl mx-auto space-y-8">
-        {/* BRAND HEADER & LOGO */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-emerald-200 pb-4 gap-4">
           <div className="flex items-center gap-3">
             <img src={BRAND_LOGO_URL} alt="Brand Logo" className="h-10 w-auto object-contain" />
@@ -288,6 +376,17 @@ export default function AdminPage() {
               }`}
             >
               Bulk Excel Upload
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('logs');
+                fetchDownloadLogs();
+              }}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                activeTab === 'logs' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+              }`}
+            >
+              📊 Download Logs
             </button>
             <button
               onClick={handleLogout}
@@ -334,7 +433,7 @@ export default function AdminPage() {
                 <input
                   type="text"
                   required
-                  placeholder="e.g. STU-1005"
+                  placeholder="e.g. 250000000000"
                   value={newStudent.id_number}
                   onChange={(e) => setNewStudent({ ...newStudent, id_number: e.target.value })}
                   className={`w-full border p-2.5 rounded-lg text-sm text-slate-800 focus:outline-none focus:ring-2 ${BRAND_RING}`}
@@ -402,7 +501,105 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* STUDENT ROSTER LIST & FILTERS */}
+        {activeTab === 'logs' && (
+          <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b pb-4 gap-3">
+              <div>
+                <h2 className="text-xl font-bold text-emerald-900">Transcript Download Activity</h2>
+                <p className="text-xs text-slate-500">Real-time log of student transcript downloads</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleExportCSV}
+                  className="text-xs font-bold text-emerald-950 bg-yellow-400 border border-yellow-500 px-3 py-1.5 rounded-lg hover:bg-yellow-500 transition shadow-sm"
+                >
+                  📊 Export Audit Logs (CSV)
+                </button>
+                <button
+                  onClick={handleClearAllLogs}
+                  disabled={clearingLogs || downloadLogs.length === 0}
+                  className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg hover:bg-rose-100 transition disabled:opacity-50"
+                >
+                  {clearingLogs ? 'Clearing...' : '🗑️ Clear Audit Logs'}
+                </button>
+                <button
+                  onClick={fetchDownloadLogs}
+                  className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition"
+                >
+                  🔄 Refresh Logs
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm border-collapse">
+                <thead>
+                  <tr className="border-b bg-emerald-50/60 text-emerald-950 font-semibold">
+                    <th className="p-3">Date & Time</th>
+                    <th className="p-3">Student Name</th>
+                    <th className="p-3">Class</th>
+                    <th className="p-3">Student ID</th>
+                    <th className="p-3">Payment Status</th>
+                    <th className="p-3">Serial Code Used</th>
+                    <th className="p-3 text-right">View Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {downloadLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-6 text-center text-slate-500">
+                        No transcript download activity recorded yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    downloadLogs.map((log) => {
+                      const matchedStudent = students.find(
+                        (s) => s.id_number === log.student_id || s.student_id === log.student_id
+                      );
+                      const studentName = log.student_name || matchedStudent?.full_name || 'N/A';
+                      const studentClass = matchedStudent?.class || 'N/A';
+
+                      return (
+                        <tr key={log.id} className="border-b hover:bg-yellow-50/30">
+                          <td className="p-3 text-xs text-slate-600 font-mono">
+                            {log.downloaded_at ? new Date(log.downloaded_at).toLocaleString() : 'N/A'}
+                          </td>
+                          <td className="p-3 font-medium text-slate-800">
+                            {studentName}
+                          </td>
+                          <td className="p-3 text-emerald-900 font-semibold">
+                            {studentClass}
+                          </td>
+                          <td className="p-3 font-mono font-bold text-slate-800">
+                            {log.student_id || 'N/A'}
+                          </td>
+                          <td className="p-3 text-emerald-900 font-semibold uppercase text-xs">
+                            {log.payment_status || 'paid'}
+                          </td>
+                          <td className="p-3 font-mono font-bold text-amber-800">
+                            {log.serial_code || 'N/A'}
+                          </td>
+                          <td className="p-3 text-right">
+                            <a
+                              href={`/?studentId=${encodeURIComponent(log.student_id || '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-bold text-emerald-800 hover:underline inline-flex items-center gap-1"
+                            >
+                              <span>Open</span>
+                              <span>↗</span>
+                            </a>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b pb-4">
             <div>
@@ -413,7 +610,6 @@ export default function AdminPage() {
             </div>
 
             <div className="flex items-center gap-2">
-              {/* PRINT SLIPS BUTTON */}
               <button
                 onClick={handleTriggerPrint}
                 className="bg-emerald-800 text-yellow-300 border border-yellow-400/30 px-4 py-2 rounded-lg text-xs font-bold hover:bg-emerald-900 transition flex items-center gap-1.5 shadow-sm"
@@ -432,7 +628,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* SEARCH & FILTERS BAR */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-emerald-50/50 p-3 rounded-lg border border-emerald-100">
             <div>
               <label className="block text-xs font-medium text-emerald-950 mb-1">Search Name or ID</label>
@@ -475,7 +670,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* ROSTER TABLE */}
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm border-collapse">
               <thead>
@@ -494,6 +688,7 @@ export default function AdminPage() {
                   <th className="p-3">Full Name</th>
                   <th className="p-3">Class</th>
                   <th className="p-3">Student ID</th>
+                  <th className="p-3">Downloads</th>
                   <th className="p-3">Serial Code</th>
                   <th className="p-3">PDF Status</th>
                   <th className="p-3">Upload Transcript</th>
@@ -503,14 +698,15 @@ export default function AdminPage() {
               <tbody>
                 {filteredStudents.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="p-6 text-center text-slate-500">
+                    <td colSpan={9} className="p-6 text-center text-slate-500">
                       No matching students found.
                     </td>
                   </tr>
                 ) : (
                   filteredStudents.map((st) => {
                     const isSelected = selectedStudentIds.includes(st.id);
-                    const isUploaded = !!st.transcript_url;
+                    const pdfUrl = st.transcript_url || st.transcript_pdf_url;
+                    const isUploaded = !!pdfUrl;
 
                     return (
                       <tr key={st.id} className={`border-b hover:bg-yellow-50/30 ${isSelected ? 'bg-yellow-50' : ''}`}>
@@ -525,6 +721,13 @@ export default function AdminPage() {
                         <td className="p-3 font-medium text-slate-800">{st.full_name}</td>
                         <td className="p-3 text-emerald-900 font-semibold">{st.class}</td>
                         <td className={`p-3 font-mono font-bold ${BRAND_TEXT}`}>{st.id_number || 'N/A'}</td>
+                        <td className="p-3">
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-bold ${
+                            (st.download_count || 0) >= 3 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'
+                          }`}>
+                            {st.download_count || 0} / 3
+                          </span>
+                        </td>
                         <td className="p-3 font-mono text-amber-700 font-semibold">{st.student_id}</td>
 
                         <td className="p-3">
@@ -556,7 +759,7 @@ export default function AdminPage() {
 
                             {isUploaded && (
                               <a
-                                href={st.transcript_url}
+                                href={pdfUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className={`text-xs underline font-bold ${BRAND_TEXT}`}
@@ -568,12 +771,14 @@ export default function AdminPage() {
                         </td>
 
                         <td className="p-3 text-right">
-                          <button
-                            onClick={() => handleDeleteSingle(st.id, st.full_name)}
-                            className="text-xs text-rose-600 hover:text-rose-800 font-semibold hover:underline"
-                          >
-                            Delete
-                          </button>
+                          <div className="flex items-center justify-end gap-3">
+                            <button
+                              onClick={() => handleDeleteSingle(st.id, st.full_name)}
+                              className="text-xs text-rose-600 hover:text-rose-800 font-semibold hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -585,17 +790,13 @@ export default function AdminPage() {
         </div>
       </div>
 
-      {/* ----------------- PRINTABLE STUDENT SLIPS (VISIBLE ONLY WHEN PRINTING) ----------------- */}
       <div className="hidden print:grid print:grid-cols-2 print:gap-4 print:p-2 bg-white text-black font-sans">
         {printableStudents.map((st) => {
-          const verifyUrl = `${BASE_VERIFY_URL}/verify?code=${st.student_id}&id=${st.id_number}`;
-
           return (
             <div
               key={st.id}
               className="border-2 border-emerald-800 rounded-lg p-4 flex flex-col justify-between space-y-3 bg-white page-break-inside-avoid"
             >
-              {/* SLIP HEADER */}
               <div className="flex items-center justify-between border-b border-emerald-800/30 pb-2">
                 <div className="flex items-center gap-2">
                   <img src={BRAND_LOGO_URL} alt="Logo" className="h-7 w-auto object-contain" />
@@ -608,7 +809,6 @@ export default function AdminPage() {
                 </span>
               </div>
 
-              {/* SLIP BODY */}
               <div className="flex justify-between items-center gap-2">
                 <div className="space-y-1.5 text-xs">
                   <div>
@@ -626,23 +826,11 @@ export default function AdminPage() {
                       <span className="font-mono font-bold text-gray-800">{st.id_number || 'N/A'}</span>
                     </div>
                   </div>
-
-                  <div>
-                    <span className="text-[10px] uppercase text-gray-500 block font-semibold">Verification Serial Code</span>
-                    <span className="font-mono font-black text-amber-800 text-sm">{st.student_id}</span>
-                  </div>
-                </div>
-
-                {/* QR CODE GENERATOR */}
-                <div className="flex flex-col items-center justify-center p-1.5 bg-gray-50 border rounded-md">
-                  <QRCode value={verifyUrl} size={82} />
-                  <span className="text-[8px] font-semibold text-gray-500 mt-1">SCAN TO ACCESS</span>
                 </div>
               </div>
 
-              {/* SLIP FOOTER */}
               <div className="border-t border-dashed border-gray-300 pt-1.5 text-[9px] text-gray-500 text-center">
-                Scan QR Code or visit <span className="font-bold text-emerald-900">{BASE_VERIFY_URL}</span>
+                Visit <span className="font-bold text-emerald-900">{BASE_VERIFY_URL}</span> to verify records
               </div>
             </div>
           );
