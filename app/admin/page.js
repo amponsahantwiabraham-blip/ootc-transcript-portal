@@ -32,17 +32,60 @@ const generateSerialCode = () => {
 
 export default function AdminPage() {
   const router = useRouter();
+
+  // Authentication & Dynamic RBAC Permissions State
+  const [currentUser, setCurrentUser] = useState(null);
+  const [role, setRole] = useState(null);
+  const [permissions, setPermissions] = useState({
+    can_add_students: false,
+    can_view_student_name: false,
+    can_view_student_class: false,
+    can_view_student_id: false,
+    can_view_downloads: false,
+    can_view_serial_codes: false,
+    can_view_pdf_status: false,
+    can_view_uploaded_transcript: false,
+    can_delete_students: false,
+    can_view_download_logs: false,
+  });
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Data States
   const [students, setStudents] = useState([]);
   const [downloadLogs, setDownloadLogs] = useState([]);
+  const [subAdmins, setSubAdmins] = useState([]);
+
+  // UI & Processing States
   const [loading, setLoading] = useState(false);
   const [uploadingPdfId, setUploadingPdfId] = useState(null);
   const [clearingLogs, setClearingLogs] = useState(false);
-  const [activeTab, setActiveTab] = useState('single');
+  const [activeTab, setActiveTab] = useState('single'); // 'single' | 'bulk' | 'logs' | 'team'
   const [selectedStudentIds, setSelectedStudentIds] = useState([]);
 
+  // Filter States
   const [searchQuery, setSearchQuery] = useState('');
   const [filterClass, setFilterClass] = useState('ALL');
   const [filterPdfStatus, setFilterPdfStatus] = useState('ALL');
+
+  // Sub-Admin Management Modal States (Super Admin)
+  const [showTeamModal, setShowTeamModal] = useState(false);
+  const [editingSubAdminId, setEditingSubAdminId] = useState(null);
+  const [formEmail, setFormEmail] = useState('');
+  const [formPassword, setFormPassword] = useState('');
+  const [formPermissions, setFormPermissions] = useState({
+    can_add_students: false,
+    can_view_student_name: true,
+    can_view_student_class: true,
+    can_view_student_id: true,
+    can_view_downloads: false,
+    can_view_serial_codes: false,
+    can_view_pdf_status: false,
+    can_view_uploaded_transcript: false,
+    can_delete_students: false,
+    can_view_download_logs: false,
+  });
+  const [teamActionLoading, setTeamActionLoading] = useState(false);
+  const [teamMessage, setTeamMessage] = useState('');
 
   const classOptions = [
     '1A1', '1A2', '1A3', '1A4', '1A5', '1A6', '1A7', '1A8', '1A9', '1A10', '1A11', '1A12',
@@ -60,19 +103,54 @@ export default function AdminPage() {
     student_id: '',
   });
 
+  // 1. Authenticate with Supabase Auth & Fetch User Permissions
   useEffect(() => {
-    const isAuth = localStorage.getItem('ootc_admin_auth');
-    if (!isAuth) {
-      router.push('/admin/login');
-    } else {
+    async function initAuthAndData() {
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) {
+        router.push('/admin/login');
+        return;
+      }
+
+      setCurrentUser(session.user);
+
+      // Query admin_users for role and permissions JSON
+      const { data: adminRecord, error } = await supabase
+        .from('admin_users')
+        .select('*')
+        .eq('id', session.user.id)
+        .single();
+
+      if (error || !adminRecord) {
+        await supabase.auth.signOut();
+        router.push('/admin/login');
+        return;
+      }
+
+      setRole(adminRecord.role);
+      setPermissions(adminRecord.permissions || {});
+
+      // Load portal data
       fetchStudents();
-      fetchDownloadLogs();
+      if (adminRecord.role === 'super_admin' || adminRecord.permissions?.can_view_download_logs) {
+        fetchDownloadLogs();
+      }
+      if (adminRecord.role === 'super_admin') {
+        fetchSubAdmins();
+      }
+
       setNewStudent((prev) => ({ ...prev, student_id: generateSerialCode() }));
+      setAuthLoading(false);
     }
+
+    initAuthAndData();
   }, [router]);
 
-  const handleLogout = () => {
-    localStorage.removeItem('ootc_admin_auth');
+  const isSuperAdmin = role === 'super_admin';
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     router.push('/admin/login');
   };
 
@@ -93,6 +171,11 @@ export default function AdminPage() {
     }
 
     if (data) setDownloadLogs(data);
+  };
+
+  const fetchSubAdmins = async () => {
+    const { data } = await supabase.from('admin_users').select('*').eq('role', 'sub_admin');
+    if (data) setSubAdmins(data);
   };
 
   const handleExportCSV = async () => {
@@ -351,43 +434,162 @@ export default function AdminPage() {
     window.print();
   };
 
+  // Sub-Admin Management Functions (Super Admin Only)
+  const openCreateSubAdminModal = () => {
+    setEditingSubAdminId(null);
+    setFormEmail('');
+    setFormPassword('');
+    setFormPermissions({
+      can_add_students: false,
+      can_view_student_name: true,
+      can_view_student_class: true,
+      can_view_student_id: true,
+      can_view_downloads: false,
+      can_view_serial_codes: false,
+      can_view_pdf_status: false,
+      can_view_uploaded_transcript: false,
+      can_delete_students: false,
+      can_view_download_logs: false,
+    });
+    setTeamMessage('');
+    setShowTeamModal(true);
+  };
+
+  const openEditSubAdminModal = (admin) => {
+    setEditingSubAdminId(admin.id);
+    setFormEmail(admin.email);
+    setFormPassword('');
+    setFormPermissions(admin.permissions || {});
+    setTeamMessage('');
+    setShowTeamModal(true);
+  };
+
+  const handleSaveSubAdmin = async (e) => {
+    e.preventDefault();
+    setTeamActionLoading(true);
+    setTeamMessage('');
+
+    try {
+      if (editingSubAdminId) {
+        const res = await fetch('/api/admin/update-permissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: editingSubAdminId, permissions: formPermissions }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setTeamMessage('Permissions updated successfully!');
+      } else {
+        const res = await fetch('/api/admin/create-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: formEmail, password: formPassword, permissions: formPermissions }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setTeamMessage('Sub-admin created successfully!');
+      }
+
+      fetchSubAdmins();
+      setTimeout(() => setShowTeamModal(false), 1200);
+    } catch (err) {
+      setTeamMessage(`Error: ${err.message}`);
+    } finally {
+      setTeamActionLoading(false);
+    }
+  };
+
+  const handleDeleteSubAdmin = async (userId) => {
+    if (!confirm('Are you sure you want to permanently delete this sub-admin account?')) return;
+
+    try {
+      const res = await fetch('/api/admin/delete-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      alert('Sub-admin deleted successfully.');
+      fetchSubAdmins();
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    }
+  };
+
+  const togglePermissionFlag = (key) => {
+    setFormPermissions((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  if (authLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-emerald-950 font-medium">Loading Portal Security Check...</div>;
+  }
+
   return (
     <>
       <div className="print:hidden min-h-screen bg-amber-50/30 p-6 max-w-6xl mx-auto space-y-8">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-emerald-200 pb-4 gap-4">
           <div className="flex items-center gap-3">
             <img src={BRAND_LOGO_URL} alt="Brand Logo" className="h-10 w-auto object-contain" />
-            <h1 className="text-2xl font-bold text-emerald-950">{BRAND_NAME}</h1>
+            <div>
+              <h1 className="text-2xl font-bold text-emerald-950">{BRAND_NAME}</h1>
+              <p className="text-xs text-slate-500">
+                Logged in: <span className="font-semibold text-emerald-900">{currentUser?.email}</span> ({role})
+              </p>
+            </div>
           </div>
 
-          <div className="flex gap-2">
-            <button
-              onClick={() => setActiveTab('single')}
-              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
-                activeTab === 'single' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
-              }`}
-            >
-              Add Single Student
-            </button>
-            <button
-              onClick={() => setActiveTab('bulk')}
-              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
-                activeTab === 'bulk' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
-              }`}
-            >
-              Bulk Excel Upload
-            </button>
-            <button
-              onClick={() => {
-                setActiveTab('logs');
-                fetchDownloadLogs();
-              }}
-              className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
-                activeTab === 'logs' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
-              }`}
-            >
-              📊 Download Logs
-            </button>
+          <div className="flex flex-wrap gap-2">
+            {(isSuperAdmin || permissions.can_add_students) && (
+              <>
+                <button
+                  onClick={() => setActiveTab('single')}
+                  className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                    activeTab === 'single' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+                  }`}
+                >
+                  Add Single Student
+                </button>
+                <button
+                  onClick={() => setActiveTab('bulk')}
+                  className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                    activeTab === 'bulk' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+                  }`}
+                >
+                  Bulk Excel Upload
+                </button>
+              </>
+            )}
+
+            {(isSuperAdmin || permissions.can_view_download_logs) && (
+              <button
+                onClick={() => {
+                  setActiveTab('logs');
+                  fetchDownloadLogs();
+                }}
+                className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                  activeTab === 'logs' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+                }`}
+              >
+                📊 Download Logs
+              </button>
+            )}
+
+            {isSuperAdmin && (
+              <button
+                onClick={() => {
+                  setActiveTab('team');
+                  fetchSubAdmins();
+                }}
+                className={`px-4 py-2 rounded-lg font-medium text-sm transition ${
+                  activeTab === 'team' ? `${BRAND_BG} text-yellow-300 shadow-sm` : 'bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-50'
+                }`}
+              >
+                👥 Manage Team
+              </button>
+            )}
+
             <button
               onClick={handleLogout}
               className="bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 px-3 py-2 rounded-lg font-medium text-sm transition"
@@ -397,7 +599,8 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {activeTab === 'single' && (
+        {/* TAB: SINGLE STUDENT ADD */}
+        {activeTab === 'single' && (isSuperAdmin || permissions.can_add_students) && (
           <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
             <h2 className="text-xl font-bold text-emerald-900">Add New Student</h2>
             <form onSubmit={handleAddStudent} className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -475,7 +678,8 @@ export default function AdminPage() {
           </div>
         )}
 
-        {activeTab === 'bulk' && (
+        {/* TAB: BULK UPLOAD */}
+        {activeTab === 'bulk' && (isSuperAdmin || permissions.can_add_students) && (
           <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-6">
             <h2 className="text-xl font-bold text-emerald-900">Bulk Upload Students via Excel</h2>
 
@@ -501,7 +705,8 @@ export default function AdminPage() {
           </div>
         )}
 
-        {activeTab === 'logs' && (
+        {/* TAB: DOWNLOAD LOGS */}
+        {activeTab === 'logs' && (isSuperAdmin || permissions.can_view_download_logs) && (
           <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b pb-4 gap-3">
               <div>
@@ -600,6 +805,66 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* TAB: TEAM MANAGEMENT (Super Admin Only) */}
+        {activeTab === 'team' && isSuperAdmin && (
+          <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
+            <div className="flex justify-between items-center border-b pb-4">
+              <div>
+                <h2 className="text-xl font-bold text-emerald-900">Sub-Admin Accounts</h2>
+                <p className="text-xs text-slate-500">Manage portal user credentials and toggle dynamic permissions</p>
+              </div>
+              <button
+                onClick={openCreateSubAdminModal}
+                className="bg-emerald-700 hover:bg-emerald-800 text-yellow-300 px-4 py-2 rounded-lg text-xs font-bold transition shadow-sm"
+              >
+                + Create Sub-Admin
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm border-collapse">
+                <thead>
+                  <tr className="border-b bg-emerald-50/60 text-emerald-950 font-semibold">
+                    <th className="p-3">Email</th>
+                    <th className="p-3">Role</th>
+                    <th className="p-3">Active Privileges</th>
+                    <th className="p-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subAdmins.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="p-6 text-center text-slate-500">
+                        No sub-admin accounts created yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    subAdmins.map((sub) => {
+                      const activeCount = Object.values(sub.permissions || {}).filter(Boolean).length;
+                      return (
+                        <tr key={sub.id} className="border-b hover:bg-yellow-50/30">
+                          <td className="p-3 font-medium text-slate-800">{sub.email}</td>
+                          <td className="p-3"><span className="bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded text-xs font-semibold">Sub-Admin</span></td>
+                          <td className="p-3 text-xs text-emerald-900 font-bold">{activeCount} / 10 active</td>
+                          <td className="p-3 text-right space-x-3">
+                            <button onClick={() => openEditSubAdminModal(sub)} className="text-emerald-800 hover:underline text-xs font-bold">
+                              Edit Permissions
+                            </button>
+                            <button onClick={() => handleDeleteSubAdmin(sub.id)} className="text-rose-600 hover:underline text-xs font-bold">
+                              Delete Sub-Admin
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* MAIN DIRECTORY TABLE */}
         <div className="bg-white p-6 rounded-xl border border-emerald-100 shadow-sm space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b pb-4">
             <div>
@@ -617,7 +882,7 @@ export default function AdminPage() {
                 🖨️ Print Slips ({printableStudents.length})
               </button>
 
-              {selectedStudentIds.length > 0 && (
+              {(isSuperAdmin || permissions.can_delete_students) && selectedStudentIds.length > 0 && (
                 <button
                   onClick={handleDeleteSelected}
                   className="bg-rose-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-rose-700 transition flex items-center gap-1"
@@ -685,14 +950,14 @@ export default function AdminPage() {
                       className="rounded border-emerald-300 text-emerald-600 focus:ring-yellow-400"
                     />
                   </th>
-                  <th className="p-3">Full Name</th>
-                  <th className="p-3">Class</th>
-                  <th className="p-3">Student ID</th>
-                  <th className="p-3">Downloads</th>
-                  <th className="p-3">Serial Code</th>
-                  <th className="p-3">PDF Status</th>
-                  <th className="p-3">Upload Transcript</th>
-                  <th className="p-3 text-right">Actions</th>
+                  {(isSuperAdmin || permissions.can_view_student_name) && <th className="p-3">Full Name</th>}
+                  {(isSuperAdmin || permissions.can_view_student_class) && <th className="p-3">Class</th>}
+                  {(isSuperAdmin || permissions.can_view_student_id) && <th className="p-3">Student ID</th>}
+                  {(isSuperAdmin || permissions.can_view_downloads) && <th className="p-3">Downloads</th>}
+                  {(isSuperAdmin || permissions.can_view_serial_codes) && <th className="p-3">Serial Code</th>}
+                  {(isSuperAdmin || permissions.can_view_pdf_status) && <th className="p-3">PDF Status</th>}
+                  {(isSuperAdmin || permissions.can_add_students || permissions.can_view_uploaded_transcript) && <th className="p-3">Upload / Transcript</th>}
+                  {(isSuperAdmin || permissions.can_delete_students) && <th className="p-3 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -718,68 +983,91 @@ export default function AdminPage() {
                             className="rounded border-emerald-300 text-emerald-600 focus:ring-yellow-400"
                           />
                         </td>
-                        <td className="p-3 font-medium text-slate-800">{st.full_name}</td>
-                        <td className="p-3 text-emerald-900 font-semibold">{st.class}</td>
-                        <td className={`p-3 font-mono font-bold ${BRAND_TEXT}`}>{st.id_number || 'N/A'}</td>
-                        <td className="p-3">
-                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-bold ${
-                            (st.download_count || 0) >= 3 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'
-                          }`}>
-                            {st.download_count || 0} / 3
-                          </span>
-                        </td>
-                        <td className="p-3 font-mono text-amber-700 font-semibold">{st.student_id}</td>
 
-                        <td className="p-3">
-                          {isUploaded ? (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
-                              Uploaded
+                        {(isSuperAdmin || permissions.can_view_student_name) && (
+                          <td className="p-3 font-medium text-slate-800">{st.full_name}</td>
+                        )}
+
+                        {(isSuperAdmin || permissions.can_view_student_class) && (
+                          <td className="p-3 text-emerald-900 font-semibold">{st.class}</td>
+                        )}
+
+                        {(isSuperAdmin || permissions.can_view_student_id) && (
+                          <td className={`p-3 font-mono font-bold ${BRAND_TEXT}`}>{st.id_number || 'N/A'}</td>
+                        )}
+
+                        {(isSuperAdmin || permissions.can_view_downloads) && (
+                          <td className="p-3">
+                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-bold ${
+                              (st.download_count || 0) >= 3 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'
+                            }`}>
+                              {st.download_count || 0} / 3
                             </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                              Pending
-                            </span>
-                          )}
-                        </td>
+                          </td>
+                        )}
 
-                        <td className="p-3">
-                          <div className="flex items-center gap-2">
-                            <label className="cursor-pointer bg-emerald-50 border border-emerald-200 text-emerald-900 hover:bg-emerald-100 px-3 py-1.5 rounded-md text-xs font-medium transition">
-                              {uploadingPdfId === st.id ? 'Uploading...' : isUploaded ? 'Replace PDF' : 'Upload PDF'}
-                              <input
-                                type="file"
-                                accept="application/pdf"
-                                onChange={(e) => handlePdfUpload(st.id, e)}
-                                disabled={uploadingPdfId === st.id}
-                                className="hidden"
-                              />
-                            </label>
+                        {(isSuperAdmin || permissions.can_view_serial_codes) && (
+                          <td className="p-3 font-mono text-amber-700 font-semibold">{st.student_id}</td>
+                        )}
 
-                            {isUploaded && (
-                              <a
-                                href={pdfUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`text-xs underline font-bold ${BRAND_TEXT}`}
-                              >
-                                View
-                              </a>
+                        {(isSuperAdmin || permissions.can_view_pdf_status) && (
+                          <td className="p-3">
+                            {isUploaded ? (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                                Uploaded
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                                Pending
+                              </span>
                             )}
-                          </div>
-                        </td>
+                          </td>
+                        )}
 
-                        <td className="p-3 text-right">
-                          <div className="flex items-center justify-end gap-3">
-                            <button
-                              onClick={() => handleDeleteSingle(st.id, st.full_name)}
-                              className="text-xs text-rose-600 hover:text-rose-800 font-semibold hover:underline"
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </td>
+                        {(isSuperAdmin || permissions.can_add_students || permissions.can_view_uploaded_transcript) && (
+                          <td className="p-3">
+                            <div className="flex items-center gap-2">
+                              {(isSuperAdmin || permissions.can_add_students) && (
+                                <label className="cursor-pointer bg-emerald-50 border border-emerald-200 text-emerald-900 hover:bg-emerald-100 px-3 py-1.5 rounded-md text-xs font-medium transition">
+                                  {uploadingPdfId === st.id ? 'Uploading...' : isUploaded ? 'Replace PDF' : 'Upload PDF'}
+                                  <input
+                                    type="file"
+                                    accept="application/pdf"
+                                    onChange={(e) => handlePdfUpload(st.id, e)}
+                                    disabled={uploadingPdfId === st.id}
+                                    className="hidden"
+                                  />
+                                </label>
+                              )}
+
+                              {(isSuperAdmin || permissions.can_view_uploaded_transcript) && isUploaded && (
+                                <a
+                                  href={pdfUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className={`text-xs underline font-bold ${BRAND_TEXT}`}
+                                >
+                                  View
+                                </a>
+                              )}
+                            </div>
+                          </td>
+                        )}
+
+                        {(isSuperAdmin || permissions.can_delete_students) && (
+                          <td className="p-3 text-right">
+                            <div className="flex items-center justify-end gap-3">
+                              <button
+                                onClick={() => handleDeleteSingle(st.id, st.full_name)}
+                                className="text-xs text-rose-600 hover:text-rose-800 font-semibold hover:underline"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })
@@ -790,6 +1078,96 @@ export default function AdminPage() {
         </div>
       </div>
 
+      {/* TEAM MANAGEMENT MODAL (SUPER ADMIN) */}
+      {showTeamModal && isSuperAdmin && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto border border-emerald-100">
+            <h3 className="text-lg font-bold text-emerald-950 mb-4">
+              {editingSubAdminId ? 'Edit Sub-Admin Privileges' : 'Create Sub-Admin Account'}
+            </h3>
+
+            {teamMessage && (
+              <div className={`p-3 rounded-lg mb-4 text-xs font-semibold ${teamMessage.startsWith('Error') ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-900'}`}>
+                {teamMessage}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveSubAdmin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Email Address</label>
+                <input
+                  type="email"
+                  required
+                  disabled={!!editingSubAdminId}
+                  value={formEmail}
+                  onChange={(e) => setFormEmail(e.target.value)}
+                  className="w-full border rounded-lg p-2.5 text-xs text-slate-800 disabled:bg-slate-100 focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              {!editingSubAdminId && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Password</label>
+                  <input
+                    type="password"
+                    required
+                    value={formPassword}
+                    onChange={(e) => setFormPassword(e.target.value)}
+                    className="w-full border rounded-lg p-2.5 text-xs text-slate-800 focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-emerald-950 mb-2">Toggle 10 Sub-Admin Privileges</label>
+                <div className="space-y-2 border p-3 rounded-lg bg-emerald-50/40 max-h-60 overflow-y-auto text-xs">
+                  {[
+                    { key: 'can_add_students', label: 'Add Students (Single & Excel)' },
+                    { key: 'can_view_student_name', label: 'View Student Name' },
+                    { key: 'can_view_student_class', label: 'View Student Class' },
+                    { key: 'can_view_student_id', label: 'View Student ID' },
+                    { key: 'can_view_downloads', label: 'View Download Counts' },
+                    { key: 'can_view_serial_codes', label: 'View Serial Codes' },
+                    { key: 'can_view_pdf_status', label: 'View PDF Status' },
+                    { key: 'can_view_uploaded_transcript', label: 'View Uploaded Transcript File' },
+                    { key: 'can_delete_students', label: 'Delete Student Records' },
+                    { key: 'can_view_download_logs', label: 'View Download Audit Logs' },
+                  ].map((perm) => (
+                    <label key={perm.key} className="flex items-center space-x-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!formPermissions[perm.key]}
+                        onChange={() => togglePermissionFlag(perm.key)}
+                        className="rounded border-emerald-300 text-emerald-700 focus:ring-yellow-400"
+                      />
+                      <span className="text-slate-800 font-medium">{perm.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-4 border-t">
+                <button
+                  type="button"
+                  onClick={() => setShowTeamModal(false)}
+                  className="px-4 py-2 border rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={teamActionLoading}
+                  className="px-4 py-2 bg-emerald-700 text-yellow-300 rounded-lg text-xs font-bold hover:bg-emerald-800 disabled:opacity-50"
+                >
+                  {teamActionLoading ? 'Saving...' : 'Save Sub-Admin'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* PRINT SLIPS TEMPLATE */}
       <div className="hidden print:grid print:grid-cols-2 print:gap-4 print:p-2 bg-white text-black font-sans">
         {printableStudents.map((st) => {
           return (
