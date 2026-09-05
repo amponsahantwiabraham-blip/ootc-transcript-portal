@@ -1,11 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-);
-
 export async function POST(request) {
   try {
     const { reference, studentId } = await request.json();
@@ -17,7 +12,20 @@ export async function POST(request) {
       );
     }
 
-    // 1. Verify payment directly with Paystack API
+    // 1. Verify environment variables and initialize Supabase Admin safely
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return NextResponse.json(
+        { error: 'Server configuration error: missing Supabase credentials' },
+        { status: 500 }
+      );
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+
+    // 2. Verify payment directly with Paystack API
     const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
     
     if (!paystackSecret) {
@@ -46,7 +54,7 @@ export async function POST(request) {
       );
     }
 
-    // 2. Activate payment status & reset download counter to 0 upon successful payment
+    // 3. Activate payment status & reset download counter to 0 upon successful payment
     const { data: student, error: dbError } = await supabaseAdmin
       .from('students')
       .update({ 
@@ -64,7 +72,7 @@ export async function POST(request) {
       );
     }
 
-    // 3. Return the active serial code to the student
+    // 4. Return the active serial code to the student
     return NextResponse.json({
       success: true,
       serialCode: student.student_id,
