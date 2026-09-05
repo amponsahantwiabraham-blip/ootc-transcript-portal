@@ -2,65 +2,103 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
 
-const BRAND_LOGO_URL = '/logo.png';
-const BRAND_NAME = 'OOTC Transcript Portal';
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+);
 
-export default function AdminLoginPage() {
-  const [passcode, setPasscode] = useState('');
+export default function AdminLogin() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    
-    // Set your admin password here
-    const ADMIN_PASSCODE = process.env.NEXT_PUBLIC_ADMIN_PASSCODE || 'GRANAHAMS0011';
+    setError('');
+    setLoading(true);
 
-    if (passcode === ADMIN_PASSCODE) {
-      // Store session in localStorage
-      localStorage.setItem('ootc_admin_auth', 'true');
+    try {
+      // 1. Authenticate with Supabase Auth
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (authError) throw authError;
+
+      // 2. Verify user exists in admin_users table
+      const { data: adminData, error: adminError } = await supabase
+        .from('admin_users')
+        .select('*')
+        .eq('id', data.user.id)
+        .single();
+
+      if (adminError || !adminData) {
+        await supabase.auth.signOut();
+        throw new Error('Access denied. You do not have admin permissions.');
+      }
+
+      // 3. Redirect to the main admin panel
       router.push('/admin');
-    } else {
-      setError('Invalid admin passcode. Please try again.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-amber-50/30 flex items-center justify-center p-4">
-      <div className="bg-white border border-emerald-100 shadow-sm rounded-xl p-6 sm:p-8 max-w-md w-full space-y-6">
-        <div className="flex flex-col items-center text-center space-y-2">
-          <img src={BRAND_LOGO_URL} alt="Logo" className="h-12 w-auto object-contain" />
-          <h1 className="text-xl font-bold text-emerald-950">{BRAND_NAME}</h1>
-          <p className="text-xs text-slate-500">Admin Dashboard Access</p>
-        </div>
+    <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+      <div className="max-w-md w-full bg-white p-8 rounded-lg shadow-md">
+        <h2 className="text-2xl font-bold text-center mb-6 text-gray-800">
+          OOTC Portal Admin Login
+        </h2>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 text-sm rounded">
+            {error}
+          </div>
+        )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-emerald-950 mb-1">
-              Admin Access Passcode
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Email Address
+            </label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="admin@example.com"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Password
             </label>
             <input
               type="password"
               required
-              placeholder="Enter passcode"
-              value={passcode}
-              onChange={(e) => setPasscode(e.target.value)}
-              className="w-full border p-2.5 rounded-lg text-sm focus:ring-2 focus:ring-yellow-400 focus:border-emerald-600 outline-none"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="••••••••"
             />
           </div>
 
-          {error && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg font-medium">
-              {error}
-            </div>
-          )}
-
           <button
             type="submit"
-            className="w-full bg-emerald-700 hover:bg-emerald-800 text-yellow-300 font-bold py-2.5 rounded-lg text-sm transition shadow-sm"
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 font-medium"
           >
-            Access Dashboard
+            {loading ? 'Authenticating...' : 'Log In'}
           </button>
         </form>
       </div>
